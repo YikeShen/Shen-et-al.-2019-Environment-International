@@ -1,0 +1,1372 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+---
+title: "FEMS Paper Data Analysis Yike Shen"
+output:
+  html_notebook:
+    highlight: default
+    theme: cosmo
+  html_document:
+    toc: yes
+    toc_depth: 2
+    toc_float:
+      collapsed: yes
+      smooth_scroll: no
+  pdf_document:
+    toc: yes
+---
+
+----
+----
+
+\pagebreak
+
+#Pharmaceutical-Lettuce Paper {.tabset}
+This script is the data analysis process for Shen's FEMS Paper. All rights reserved for Yike Shen
+
+> **Index**
+> 
+> * Raw data preprocessing from WaferGen - ARGs
+> * Figure 1 - Heatmap on ARGs relative abundance
+> * Figure S1 - Upset plot
+> * Figure 2 - ARGs resistance mechanism (MDR,MGE,MLSB,Beta lactam)
+> * Figure S2 - ARGs PCoA ordination
+> * Figure 3A - Bacteria community bar plot, phyla level
+> * Figure 4 - Bacteria community bar plot, family level
+> * Figure S4 - Ordination analysis of all ordination methods
+> * Figure 4 -  Alpha Diversity
+> * Network Analysis
+
+-----
+
+
+~~~
+```{r}
+#Install packages
+install.packages("xlsx")
+install.packages("plyr")
+install.packages("scales")
+install.packages("rJava")
+install.packages("pheatmap")
+install.packages("vegan")
+install.packages("rmarkdown")
+install.packages("corrplot")
+install.packages("Hmisc")
+install.packages("UpSetR")
+install.packages("devtools")
+devtools::install_github("jokergoo/circlize",force=TRUE)
+install.packages("labdsv")
+install.packages("dendextend")
+install.packages("ggsci")
+install.packages("ade4")  #Distances, similar to vegan.
+devtools::install_github("jfq3/ggordiplots")
+source("https://bioconductor.org/biocLite.R")
+biocLite("phyloseq")
+install.packages("corrplot")
+#install.packages("Hmisc")
+install.packages("tidyr")
+install.packages("tidyverse")
+
+```
+
+```{r}
+#Set Working Directory
+setwd("/Users/yikeshen/Desktop/R Working Directory")
+#setwd("~/Desktop/R Working Directory")
+#Input datasheet needed
+#FEMS_R_input_sheet.xlsx
+```
+
+```{r}
+library("rmarkdown")
+library(tidyr)
+library(tidyverse)
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(pheatmap) 
+library(vegan)
+library(RColorBrewer)
+library(UpSetR)
+library(circlize)
+library(ggordiplots)
+library(vegan)
+library(permute)
+library(lattice)
+library(labdsv)
+library(dendextend)
+library("ggsci")
+library(ade4)
+library(phyloseq)
+library("ape")
+library("plyr")
+library(scales)
+library(Hmisc)
+library(corrplot)
+```
+
+~~~~~~~~~~~~~~ARGs, line108-862~~~~~~~~~~~~~~~~~~~~~~~
+##WaferGen Rawdata Preprocessing
+#Antibiotic Resistance Genes data processing #First filter
+```{r}
+#Read raw WaferGen Data
+FinalARG16 <- read_excel("EI_R_input_sheet.xlsx",sheet = "ARGs_Raw")
+
+#Select data columns that will be used in the pipe
+FinalARG16_Tidy <- FinalARG16 %>% 
+  dplyr::select('Assay','Sample', 'Ct')
+
+FinalARG_preprocess <- FinalARG16_Tidy %>% 
+  spread(key = Sample,value=Ct)%>%
+  arrange(Assay) 
+
+#Replace missing 16s rRNA gene from PCR amplification curve by WaferGen SmartChip PCR
+FinalARG_preprocess[1,50] <- 13.5293  #SWA01-rep1
+FinalARG_preprocess[1,53] <- 14.21801  #SWA02-rep1
+FinalARG_preprocess[1,56] <- 13.6981  #SWA03-rep1 
+FinalARG_preprocess[1,57] <- 13.57172 #SWA03-rep2
+FinalARG_preprocess[1,72] <-12.87179 #SWA08-rep2 
+FinalARG_preprocess[1,74] <- 13.1592  #SWA09-rep1
+FinalARG_preprocess[1,76] <- 13.21939  #SWA09-rep3
+
+#Pull out non numeric Assay column
+Assay<-FinalARG_preprocess %>% 
+  dplyr::select(Assay)
+
+#Data Matrix 
+FinalARG_process<-FinalARG_preprocess %>% 
+  dplyr::select(-Assay)
+
+num_row<-nrow(FinalARG_process)
+num_column<-ncol(FinalARG_process)
+
+#If 2 in 3 WaferGen triplicates is NA, all of them is NA
+for (i in 1:num_row){
+  for (j in 1:(num_column/3)){
+    Process_vector<-FinalARG_process[i, c(j*3-2,j*3-1,j*3)]
+    if (sum(is.na.data.frame(Process_vector)) ==2){
+      FinalARG_process[i, c(j*3-2,j*3-1,j*3)] <- NA
+    }    
+  }
+}
+
+#Cutoff Ct=30. ForCt>30, return NA
+for (i in 1:num_row){
+  for (j in 1:num_column){
+    if (is.na.data.frame(FinalARG_process[i,j])[1]){
+      next
+    }
+    if (FinalARG_process[i,j] > 30){
+      FinalARG_process[i,j] <- NA
+    }
+  }
+}
+
+#TransferAYXX-XX, reorder the dataset
+Assay <- lapply(Assay, function(x){gsub("AY","",x)})
+Assay <- as.numeric(unlist(Assay))
+FinalARG_process_new<-cbind(Assay,FinalARG_process)
+FinalARG_process_new_withassay<-FinalARG_process_new[order(FinalARG_process_new$Assay),]
+
+#Four samples were tested for 384 primers, 144 primer were then selected with one or more Ct<30 detected
+primer384 <- read_excel("EI_R_input_sheet.xlsx",sheet = "Primer_384")
+primer144 <- read_excel("EI_R_input_sheet.xlsx",sheet = "Primer_144")
+
+#Tidying final 144 assays
+Assay144 <- primer144 %>% 
+  dplyr::select(Assay...1) %>% 
+  dplyr::rename(Assay144 ="Assay...1") %>% 
+  t()
+
+Assay384 <- primer384 %>% 
+  dplyr::select(`Primer Number...2`) %>% 
+  dplyr::rename(Assay384="Primer Number...2") %>% 
+  t()
+
+length(Assay144) <-384
+
+Assay_Bind_144384 <- rbind(Assay144,Assay384)
+Assay_Bind_144384 <- Assay_Bind_144384 %>% 
+  t() %>% 
+  as.matrix()
+
+AssayProcess<-data.frame(matrix(NA,nrow=384,ncol=2))
+#for (i in (1:144)){
+  #AssayProcess[as.numeric(Assay_Bind_144384[i,1]),1] <- as.numeric(Assay_Bind_144384[i,1])
+#}
+
+for (i in (1:144)){
+  temp = Assay_Bind_144384[i,1]
+  value = substr(temp,3,5)
+  AssayProcess[as.numeric(value),1] <- value
+}
+
+
+AssayProcess144 <- AssayProcess %>% 
+  dplyr::rename(Assay144 ="X1") %>% 
+  dplyr::select(Assay144)
+
+primer384 <- as.data.frame(primer384) #Convert atomic vector to character string
+class(primer384$ForwardPrimer)
+class(primer384$ReversePrimer)
+
+#Pay attention to use .xxx =c(characterstring) for the select function to get a column
+primer384 <- primer384 %>% 
+  dplyr::select('Newname', .ForwardPrimer =  c("ForwardPrimer"), .ReversePrimer =  c("ReversePrimer"), 
+         .FunctionalClassification =  c("Functionalclassification"),
+         .Targetantibiotics =  c("Targetantibiotics(major)")) 
+
+primer_assay_data <- cbind(AssayProcess144,primer384,FinalARG_process_new_withassay)
+
+#Final 144 primers we use
+ProcessFinal144 <- primer_assay_data[is.na.data.frame(primer_assay_data[,1])==FALSE,]
+
+#Filter rows with all NAs
+FinalARG_process_filtered <- ProcessFinal144[
+  rowSums(is.na.data.frame(ProcessFinal144)) < 84, 
+  ]
+
+#Add 1,2 for same ARG name with different primer
+num_row_2 <- length(FinalARG_process_filtered$Newname)
+
+for (i in 1:(num_row_2-1)){
+  if (FinalARG_process_filtered$Newname[i] == FinalARG_process_filtered$Newname[i+1]){
+    FinalARG_process_filtered$Newname[i] <- paste(FinalARG_process_filtered$Newname[i], "_1", sep = '')
+    FinalARG_process_filtered$Newname[i+1] <- paste(FinalARG_process_filtered$Newname[i+1], "_2", sep = '')
+  }
+}
+
+Output_table_assay_primer <- dplyr::select( FinalARG_process_filtered,Newname,.ForwardPrimer,.ReversePrimer, Assay,.Targetantibiotics)
+
+#Average and Standard deviation
+num_column2<-85
+num_row2<-68
+(num_column2-1)/3
+dataframeAVESTDCOPIESRA <- FinalARG_process_filtered [,-c(1:7)]
+
+#Average and Standard deviation of Ct
+Average_df<-data.frame(matrix(0,nrow=68,ncol=28))
+std_df<-data.frame(matrix(0,nrow=68,ncol=28))
+
+for (i in 1:num_row2){
+  for (j in 1:((num_column2)/3)){
+    Process_vector<-as.numeric(unlist(dataframeAVESTDCOPIESRA[i, c(j*3-2,j*3-1,j*3)]))
+    
+    if (sum(is.na.data.frame(Process_vector)) ==3){
+      Average_df[i,j] = NA
+      std_df[i,j] = NA      
+    }
+    else{
+      average <- mean(na.omit(Process_vector))
+      std_val <- sd(na.omit(Process_vector))
+      Average_df[i,j] = average
+      std_df[i,j] = std_val      
+    }
+  }
+}
+
+Assay144_filtered <- Output_table_assay_primer %>% 
+  dplyr::select(Assay)
+
+#Calculate Estimated Copies using equation 10^((30-average)/3.3333
+estimated_copies<-data.frame(matrix(NA,nrow=68,ncol=28))
+
+for (i in 1:num_row2){
+  for (j in 1:((num_column2)/3)){
+    if (is.na.data.frame(Average_df[i,j])){
+      next
+    }
+    estimated_copies[i,j] <- (10^((30-Average_df[i,j])/3.3333))
+    }
+}
+
+#Calculate Relative Abundance normalized to 16s rRNA gene
+relative_abundance<-data.frame(matrix(NA,nrow=68,ncol=28))
+for (i in 1:num_row2){
+    relative_abundance[i,] = estimated_copies[i,]/estimated_copies[1,]
+}
+
+#putting colnames and row names into dataframe
+columnnames <- colnames(dataframeAVESTDCOPIESRA)
+
+#Delete,rep1,2,3 for triplicates to get column names
+columnnames <- gsub("-\\S+", "", columnnames,ignore.case=T)
+
+#Get the string of column names
+columnnames <- unique(columnnames[])
+
+#Add colnames to calculated dataframe
+colnames(Average_df) <- columnnames
+colnames(std_df) <- columnnames
+colnames(estimated_copies)<- columnnames
+colnames(relative_abundance) <- columnnames
+row.names(Assay144_filtered) <- seq(from =1, to =68)
+
+SixteenS <- Average_df[1,] %>% 
+  t()
+
+#write.csv(SixteenS,"sixteensCt.csv")
+#reorder columns according to our sample characteristics
+SampleAbbreviation <- read_excel("EI_R_input_sheet.xlsx",sheet = "SampleAbbreviation")
+
+Average_df <- Average_df[c("SWA03","SWA06","SWA09","SWA12","SWA02",
+                           "SWA05","SWA08","SWA11","SWA01","SWA04","SWA07",
+                           "SWA10","PWA02","PWA04","PWA06","PWA08","PWA12",
+                           "PWA14","PWA16","PWA01","PWA03","PWA05", "PWA07", 
+                           "PWA09","PWA11","PWA13","PWA15","NC")]
+
+std_df <- std_df[c("SWA03","SWA06","SWA09","SWA12","SWA02",
+                           "SWA05","SWA08","SWA11","SWA01","SWA04","SWA07",
+                           "SWA10","PWA02","PWA04","PWA06","PWA08","PWA12",
+                           "PWA14","PWA16","PWA01","PWA03","PWA05", "PWA07", 
+                           "PWA09","PWA11","PWA13","PWA15","NC")]
+
+estimated_copies <- estimated_copies[c("SWA03","SWA06","SWA09","SWA12","SWA02",
+                           "SWA05","SWA08","SWA11","SWA01","SWA04","SWA07",
+                           "SWA10","PWA02","PWA04","PWA06","PWA08","PWA12",
+                           "PWA14","PWA16","PWA01","PWA03","PWA05", "PWA07", 
+                           "PWA09","PWA11","PWA13","PWA15","NC")]
+
+relative_abundance <- relative_abundance[c("SWA03","SWA06","SWA09","SWA12","SWA02",
+                           "SWA05","SWA08","SWA11","SWA01","SWA04","SWA07",
+                           "SWA10","PWA02","PWA04","PWA06","PWA08","PWA12",
+                           "PWA14","PWA16","PWA01","PWA03","PWA05", "PWA07", 
+                           "PWA09","PWA11","PWA13","PWA15","NC")]
+
+#Adding new name to column
+Papername <- SampleAbbreviation$PaperName
+colnames(Average_df) <- Papername
+colnames(std_df) <- Papername
+colnames(estimated_copies) <- Papername
+colnames(relative_abundance) <- Papername
+
+#Outputtables
+Output_table_averageCt <- cbind(Assay144_filtered,Average_df)
+Output_table_std <- cbind(Assay144_filtered,std_df)
+output_table_estimatedcopies<-cbind(Assay144_filtered,estimated_copies)
+output_table_relativeabundance <- cbind(Assay144_filtered,relative_abundance)
+Output_table_assay_primer
+
+```
+#ARGs data preprocessing, second filter
+```{r}
+#Do average of triplicates PharCIW, the one we did before is the WaferGen Triplicate
+#Same pipeline, just for samples
+#This one is the triplicate samples. 
+
+Average_df <- Average_df[,-c(28)] #Delete NC from WaferGen Machine
+
+#No triplicate for controls, pull out control samples 
+CtControls <- Average_df %>% 
+  dplyr::select(SBSC,SMSC,STSC,ROC,SOC,SSC)
+
+Average_df <- Average_df %>% dplyr::select(-SBSC,-SMSC,-STSC,-ROC,-SOC,-SSC)
+num_col3 <- ncol(Average_df)
+num_row3 <- nrow(Average_df)
+
+#If 2 in 3 triplicate are NA, all of them is NA
+for (i in 1:num_row3){
+  for (j in 1:(num_col3/3)){
+    Process_vector2<-Average_df[i, c(j*3-2,j*3-1,j*3)]
+    if (sum(is.na.data.frame(Process_vector2)) ==2){
+      Average_df[i, c(j*3-2,j*3-1,j*3)] <- NA
+    }    
+  }
+}
+
+Average_df <- cbind(Output_table_assay_primer,Average_df,CtControls)
+
+#Filter all NAs in 39 Samples
+Average_df <- Average_df[
+  rowSums(is.na.data.frame(Average_df)) < 27, 
+  ]
+
+FinalAssay_Gene <- Average_df[, c(1:5)]
+Output_table_FinalAssay_Gene <- FinalAssay_Gene[-2,]
+
+
+CtControl2 <- Average_df[-2,] %>% dplyr::select(SBSC,SMSC,STSC,ROC,SOC,SSC)
+Average_df <- Average_df %>% dplyr::select(-SBSC,-SMSC,-STSC,-ROC,-SOC,-SSC)
+
+#Average and standard deviation
+Average_df <- Average_df[-2,-c(1:5)]
+num_row4 <- nrow(Average_df)
+num_col4 <- ncol(Average_df) 
+
+Average_df_sample<-data.frame(matrix(0,nrow=53,ncol=7))
+std_df_sample<-data.frame(matrix(0,nrow=51,ncol=7))
+
+for (i in 1:num_row4){
+  for (j in 1:((num_col4)/3)){
+    Process_vector2<-as.numeric(unlist(Average_df[i, c(j*3-2,j*3-1,j*3)]))
+    
+    if (sum(is.na.data.frame(Process_vector2)) ==3){
+      Average_df_sample[i,j] = NA
+      std_df_sample[i,j] = NA      
+    }
+    else{
+      average2 <- mean(na.omit(Process_vector2))
+      std_val2 <- sd(na.omit(Process_vector2))
+      Average_df_sample[i,j] = average2
+      std_df_sample[i,j] = std_val2      
+    }
+  }
+}
+
+columnnamesphar <- c("SBS","SMS","STS","RO","RS","SO","SS")
+colnames(Average_df_sample) <- columnnamesphar
+
+Average_df_sample <- cbind(Average_df_sample,CtControl2) 
+
+Average_df_sample <- Average_df_sample[c('SBSC','SBS','SMSC','SMS','STSC','STS','ROC','RO','RS','SOC','SO','SSC','SS')]
+
+###Now we are working with Average_df_sample matrix
+#Calculate Estimated Copies using equation 10^((30-average)/3.3333
+estimated_copies_sample<-data.frame(matrix(NA,nrow=53,ncol=13))
+
+for (i in 1:num_row4){
+  for (j in 1:13){
+    if (is.na.data.frame(Average_df_sample[i,j])){
+      next
+    }
+    estimated_copies_sample[i,j] <- (10^((30-Average_df_sample[i,j])/3.3333))
+  }
+}
+
+#Relative Abundance
+relative_abundance_sample<-data.frame(matrix(NA,nrow=53,ncol=13))
+for (i in 1:num_row4){
+  relative_abundance_sample[i,] = estimated_copies_sample[i,]/estimated_copies_sample[1,]
+}
+
+Papername_Final <- cbind("SBSC", "SBS", "SMSC", "SMS", "STSC","STS", "ROC",
+"RO", "RS", "SOC", "SO", "SSC", "SS" ) 
+
+colnames(Average_df_sample) <- Papername_Final
+#colnames(std_df_sample) <- Papername_Final
+colnames(estimated_copies_sample)<- Papername_Final
+colnames(relative_abundance_sample) <- Papername_Final
+
+Assay53 <- Output_table_FinalAssay_Gene %>% 
+ dplyr::select(Assay)
+row.names(Assay53) <- seq(from =1, to =53)
+
+Output_table_FinalAssay_Gene
+Ct_downstream <- cbind(Assay53, Average_df_sample)
+std_downstream <- cbind(Assay53, std_df_sample)
+estimatedcopies_downstream <- cbind(Assay53,estimated_copies_sample)
+relativeabundance_downstream <- cbind(Assay53,relative_abundance_sample)
+#write.csv(Output_table_FinalAssay_Gene,"Output_table_FinalAssay_Gene.csv")
+
+```
+~~~
+
+#Figure 1A, Heatmap based on Relative Abundance
+```{r}
+relative_abundance_heatmap <- relativeabundance_downstream
+row.names(relative_abundance_heatmap) <- Output_table_FinalAssay_Gene$Newname
+relative_abundance_heatmap <- relative_abundance_heatmap[-1,] %>% 
+  dplyr::select(-Assay) %>% 
+  log2() 
+#Force dataframe to be numeric
+relative_abundance_heatmap <- data.matrix(relative_abundance_heatmap, rownames.force = NA)
+#Color break
+breaklists <- seq(min(relative_abundance_heatmap,na.rm = T), max(relative_abundance_heatmap,na.rm = T), by=0.7)
+
+RAheatmap <- pheatmap(relative_abundance_heatmap,
+              #border_color = NA,
+              cluster_rows = F,
+              cluster_cols = F,
+              fontsize = 12,
+              fontsize_row = 9,
+              cellwidth = 20,
+              cellheight= 8,
+              color = colorRampPalette(rev(brewer.pal(n = 11,
+                                                      name = "RdYlBu")))(length(breaklists)),
+              breaks = breaklists,
+              main="ARGs or MGEs/16S rRNA")
+
+```
+
+#Figure 1B: Selected Heatmap
+```{r}
+selected_RA_heatmap <- cbind(Output_table_FinalAssay_Gene$.Targetantibiotics,
+                             Output_table_FinalAssay_Gene$Newname,relativeabundance_downstream) %>% 
+  as.data.frame() %>% dplyr::rename(TargetAntibiotics="Output_table_FinalAssay_Gene$.Targetantibiotics")
+
+selected_RA_heatmap <- selected_RA_heatmap[
+  rowSums(is.na.data.frame(selected_RA_heatmap)) < 7, 
+  ]
+
+selected_RA_heatmap1 <- selected_RA_heatmap %>% 
+  #mutate(selected_RA_heatmap=factor(selected_RA_heatmap)) %>% 
+  as.tibble() %>% 
+  arrange(selected_RA_heatmap$TargetAntibiotics)
+
+selected_RA_heatmap1 <- selected_RA_heatmap1[-1,-3]
+selected_RA_heatmap2 <- selected_RA_heatmap1 %>% dplyr::select(-TargetAntibiotics) %>% 
+  dplyr::rename(Genename="Output_table_FinalAssay_Gene$Newname")
+selected_RA_heatmap2 <- selected_RA_heatmap2[c(3,4,5,11,12,6,7,8,1,2,9,10),]
+selected_RA_heatmap3 <- selected_RA_heatmap2 %>% as.data.frame()
+row.names(selected_RA_heatmap3) <- selected_RA_heatmap2$Genename
+selected_RA_heatmap3 <- selected_RA_heatmap3[,-1]
+selected_RA_heatmap4 <- selected_RA_heatmap3 %>% log2()
+
+selected_RA_heatmap4 <- data.matrix(selected_RA_heatmap4, rownames.force = NA)
+#selected_RA_heatmap4 <- selected_RA_heatmap4[c(ISPps,ISSm2,intl1,repA,tnpA_1,
+                                               #oprJ,mexE,mexF,blaPDC,blaFOX,oleC,merA),]
+
+#Color break
+breaklists_selected <- seq(min(selected_RA_heatmap4,na.rm = T), max(selected_RA_heatmap4,na.rm = T), by=0.7)
+#With clusters, not used in the paper
+selected_RA_hp <- pheatmap(selected_RA_heatmap4,
+              #border_color = NA,
+              #cluster_rows = F,
+              cluster_cols = F,
+              fontsize = 12,
+              fontsize_row = 9,
+              cellwidth = 20,
+              cellheight= 8,
+              color = colorRampPalette(rev(brewer.pal(n = 11,
+                                                      name = "RdYlBu")))(length(breaklists_selected)),
+              breaks = breaklists_selected,
+              main="Antibiotic Resistance Genes/16S rRNA")
+
+#Without clusters, used in the paper
+selected_RA_hp2 <- pheatmap(selected_RA_heatmap4,
+              #border_color = NA,
+              cluster_rows = F,
+              cluster_cols = F,
+              fontsize = 12,
+              fontsize_row = 9,
+              cellwidth = 20,
+              cellheight= 8,
+              color = colorRampPalette(rev(brewer.pal(n = 11,
+                                                      name = "RdYlBu")))(length(breaklists_selected)),
+              breaks = breaklists_selected,
+              main="ARGs or MGEs/16S rRNA")
+
+```
+
+#Figure S1: Upset Plot
+```{r}
+#Upset plot for gene intersection
+UPSET <- relativeabundance_downstream
+row.names(UPSET) <- Output_table_FinalAssay_Gene$Newname
+UPSET <- UPSET[-1,] %>% 
+  dplyr::select(-Assay) 
+
+UPSET[is.na(UPSET)]<-0
+UPSET[UPSET>0]<-1 
+
+transform(UPSET,as.numeric())
+upset(UPSET)
+#UpSetAll
+PlotUpset<-upset(UPSET,
+                 sets=c("SBSC", "SBS", "SMSC", "SMS","STSC", "STS","ROC", "RO", "RS", "SOC", "SO", "SSC", "SS"),
+                sets.bar.color = "blue",
+                 order.by = "freq",
+                empty.intersections = "on", 
+                keep.order = TRUE,
+                point.size = 3.5, line.size = 3, 
+                mainbar.y.label = "Gene Intersections", sets.x.label = "Genes Per Sample", 
+                text.scale = 2
+                )
+
+#UpsetSoil
+PlotUpsetSoil<-upset(UPSET,
+                 sets=c("SBSC", "SBS", "SMSC", "SMS","STSC", "STS"),
+                sets.bar.color = "blue",
+                order.by = "freq",
+                #empty.intersections = "on", 
+                keep.order = TRUE,
+                point.size = 3.5, line.size = 3, 
+                mainbar.y.label = "Gene Intersections", sets.x.label = "Genes Per Sample", 
+                text.scale =2
+                )
+
+#UpsetRoot
+PlotUpsetRoot<-upset(UPSET,
+                 sets=c("ROC", "RO", "RS"),
+                sets.bar.color = "blue",
+                order.by = "freq",
+                #empty.intersections = "on", 
+                keep.order = TRUE,
+                point.size = 3.5, line.size = 3, 
+                mainbar.y.label = "Gene Intersections", sets.x.label = "Genes Per Sample", 
+                text.scale = 2
+                )
+
+#UpsetShoot
+PlotUpsetShoot<-upset(UPSET,
+                 sets=c("SOC", "SO", "SSC", "SS"),
+                sets.bar.color = "blue",
+                order.by = "freq",
+                #empty.intersections = "on", 
+                keep.order = TRUE,
+                point.size = 3.5, line.size = 3, 
+                mainbar.y.label = "Gene Intersections", sets.x.label = "Genes Per Sample", 
+                text.scale = 2
+                )
+
+
+#UpsetControl
+PlotUpsetControl<-upset(UPSET,
+                 sets=c("SBSC", "SMSC", "STSC", "ROC", "SOC", "SSC"),
+                sets.bar.color = "blue",
+                 order.by = "freq",
+                #empty.intersections = "on", 
+                keep.order = TRUE,
+                point.size = 3.5, line.size = 3, 
+                mainbar.y.label = "Gene Intersections", sets.x.label = "Genes Per Sample", 
+                text.scale = 2
+                )
+
+#UpsetPharmaceuticals
+PlotUpsetPharmaceuticals<-upset(UPSET,
+                 sets=c("SBS", "SMS", "STS", "RO", "RS", "SO", "SS"),
+                sets.bar.color = "blue",
+                 order.by = "freq",
+                #empty.intersections = "on", 
+                keep.order = TRUE,
+                point.size = 3.5, line.size = 3, 
+                mainbar.y.label = "Gene Intersections", sets.x.label = "Genes Per Sample", 
+                text.scale = 2
+                )
+
+```
+
+#Targeted Resistance class Antibiotic resistance
+#Figure 2 Chord diagram of resistance mechanism
+```{r}
+#Sum of relative abundance
+TargetAntibiotics <- Output_table_FinalAssay_Gene$.Targetantibiotics %>% 
+  as.matrix()
+
+SumTargetAntibiotics <- cbind(TargetAntibiotics,relative_abundance_sample)
+  
+SumTargetAntibiotics <- SumTargetAntibiotics %>% 
+  mutate(TargetAntibiotics=factor(TargetAntibiotics)) %>% 
+  as.tibble() %>% 
+  arrange(TargetAntibiotics)
+
+SumTargetAntibiotics[is.na(SumTargetAntibiotics)] <- 0
+
+Aminoglycoside <- colSums(SumTargetAntibiotics[(2:3),-1]) %>% 
+  as.matrix()
+
+BetaLactam <- colSums(SumTargetAntibiotics[(6:13),-1]) %>% 
+  as.matrix()
+
+MDR <- colSums(SumTargetAntibiotics[(18:34),-1]) %>% 
+  as.matrix()
+
+Sulfonamide <- colSums(SumTargetAntibiotics[45,-1]) %>% 
+  as.matrix()
+
+Tetracycline <- colSums(SumTargetAntibiotics[46,-1]) %>% 
+  as.matrix()
+
+Vancomycin <- colSums(SumTargetAntibiotics[(49:53),-1]) %>% 
+  as.matrix()
+
+MGE <- colSums(SumTargetAntibiotics[c(14:17,42:44,47:48),-1]) %>% 
+  as.matrix()
+
+MLSB <- colSums(SumTargetAntibiotics[(35:39),-1]) %>% 
+  as.matrix()
+
+colnamesRA_TAR_ANTI <- c("MDR","MGE","BetaLactam","MLSB","Aminoglycoside","Sulfonamide","Tetracycline","Vancomycin") %>% as.matrix()
+
+TargetAntibiotics_new <- cbind(MDR,MGE,BetaLactam,MLSB,Aminoglycoside,Sulfonamide,Tetracycline,Vancomycin) %>% as.matrix() %>% t()
+
+rownames(TargetAntibiotics_new) <- colnamesRA_TAR_ANTI
+
+TargetAntibiotics_new[TargetAntibiotics_new == 0.000000e+00]<-NA
+
+#heatmap of target antibiotics
+TargetAntibiotics_new_hp<-data.frame(matrix(NA,nrow=8,ncol=13))
+
+for (i in (1:8)){
+  for (j in (1:13)){
+    if (is.na.data.frame(TargetAntibiotics_new[i,j])){
+      next
+    }
+    TargetAntibiotics_new_hp[i,j] <- log2(TargetAntibiotics_new[i,j])
+  }
+}
+
+row.names(TargetAntibiotics_new_hp) <- colnamesRA_TAR_ANTI
+colnames(TargetAntibiotics_new_hp) <- Papername_Final
+breaksList3 <- seq(min(TargetAntibiotics_new_hp,na.rm = T), max(TargetAntibiotics_new_hp,na.rm = T), by =0.7)
+TargetAntibiotics_new_hp<- pheatmap(TargetAntibiotics_new_hp,
+              #border_color = NA,
+              cluster_rows = F,
+              cluster_cols = F,
+              fontsize = 12,
+              fontsize_row = 9,
+              cellwidth = 20,
+              cellheight= 8,
+              color = colorRampPalette(rev(brewer.pal(n = 11,
+                                                      name="RdYlBu")))(length(breaksList3)),
+              breaks = breaksList3,
+              main="Targeted Resistance Antibiotics Classes")
+
+###Chord Diagram 
+colnames(colnamesRA_TAR_ANTI) <- "ResistanceAntibiotics"
+TargetAntibiotics_new_chord <- cbind(colnamesRA_TAR_ANTI,TargetAntibiotics_new) %>% 
+   as.tibble() %>% 
+   as.matrix()
+
+TargetAntibiotics_new_chord1 <- TargetAntibiotics_new_chord[(1:4),] %>%
+  as.tibble() %>% 
+  gather(2:14,key ="Sample",value="RelativeAbundance" ) %>% 
+  filter(!RelativeAbundance == "NA")
+
+TargetAntibiotics_new_chord1[,3] <- as.numeric(unlist(TargetAntibiotics_new_chord1[,3]))
+
+circos.clear()
+grid.col = c(MDR = "red", BetaLactam = "green", MGE = "blue",
+             MLSB= "grey")
+chordDiagram(TargetAntibiotics_new_chord1, grid.col = grid.col,
+             annotationTrack = c("grid", "axis")) 
+for(si in get.all.sector.index()) {
+    xlim = get.cell.meta.data("xlim", sector.index = si, track.index = 1)
+    ylim = get.cell.meta.data("ylim", sector.index = si, track.index = 1)
+    circos.text(mean(xlim), mean(ylim), si, sector.index = si, track.index = 1, 
+        facing = "downward", niceFacing = TRUE, col = "Black")
+}
+
+```
+
+#Figure S2: Correlation ARGs and Antibiotics
+#Tidying Pharmaceutical Concentration data
+```{r}
+Pharcon<- read_excel("EI_R_input_sheet.xlsx",sheet = "PharConcentrationsTable")
+#Select Week5
+Pharcon <- Pharcon %>% 
+  filter(`Harvest Week`==5)
+# Delete 3 non antibiotics
+Pharcon <- Pharcon[-(1:15),]
+
+#Surface Irrigation dataframe
+Pharcon_Surface <- Pharcon %>% 
+  dplyr::select(-`Harvest Week`,-`Standard Deviation (µg/kg)...5`,-`Standard Deviation (µg/kg)...7`,-`Average Overhead Concentration (µg/kg)`) %>% 
+  spread(key= "Sample Type", value="Average Surface Concentration (µg/kg)") %>% 
+  dplyr::rename(RS="Root", SS="Shoot",SBS = "Soil - Bottom Layer", SMS="Soil - Middle Layer", STS ="Soil - Top Layer")
+
+#Overhead Irrigation dataframe
+Pharcon_Overhead <- Pharcon %>% 
+  dplyr::select(-`Harvest Week`,-`Standard Deviation (µg/kg)...5`,-`Standard Deviation (µg/kg)...7`,-`Average Surface Concentration (µg/kg)`) %>% 
+  spread(key= "Sample Type", value="Average Overhead Concentration (µg/kg)") %>% 
+  dplyr::rename(RO="Root", SO="Shoot",SBS_D = "Soil - Bottom Layer", 
+         SMS_D="Soil - Middle Layer", STS_D ="Soil - Top Layer",Phar_D="Pharmaceutical") %>%
+  dplyr::select(-SBS_D,-SMS_D,-STS_D)
+
+#Bind two dataframe and delete the samples we are not tested
+Pharmaceuticalconcentration <- cbind(Pharcon_Surface, Pharcon_Overhead) %>% 
+  dplyr::select(-Phar_D) 
+rownamesantibiotics <- Pharmaceuticalconcentration$Pharmaceutical
+
+#Get the column reordered to our sequence
+Pharmaceuticalconcentration <- Pharmaceuticalconcentration[c(4,5,6,7,2,8,3)]
+colnamesantibiotics <- colnames(Pharmaceuticalconcentration)
+SeperateAntibioticsCon <- Pharmaceuticalconcentration
+  
+rownames(SeperateAntibioticsCon) <- rownamesantibiotics 
+
+#The table of seperate antibiotics concentration
+SeperateAntibioticsCon <- SeperateAntibioticsCon %>% t()
+
+#Sum of antibiotics
+Pharmaceuticalconcentration <- colSums(Pharmaceuticalconcentration) %>% 
+  as.matrix() %>% 
+  as.tibble() %>% 
+  dplyr::rename(Antibiotics_Con="V1") 
+Pharmaceuticalconcentration <- Pharmaceuticalconcentration %>% 
+  as.data.frame()
+
+row.names(Pharmaceuticalconcentration) <- colnamesantibiotics
+#Antibiotics Concentration (µg/kg)
+##Transfer to relative abundance dataset (correlation)
+
+#SumRelativeAbundance,log2 transformation
+RAsum <- relativeabundance_downstream [-1,]%>% 
+  dplyr::select(-Assay)
+RAsum[is.na(RAsum)] <- 0
+
+ARGscon <- colSums(RAsum) %>% 
+  as.matrix() %>% 
+  log2() 
+
+ARGscon_nocontrol <- ARGscon[-c(1,3,5,7,10,12),] %>% 
+  as.matrix() %>% 
+  as.tibble() %>% 
+  dplyr::rename(ARGs_Con ="V1")
+
+#Correlation test ARGs&Antibiotics  
+Correlation_ARGs_Antibiotics <- cbind(ARGscon_nocontrol,Pharmaceuticalconcentration)
+cor.test(Correlation_ARGs_Antibiotics$ARGs_Con,Correlation_ARGs_Antibiotics$Antibiotics_Con,method="spearman")
+
+ggplot(Correlation_ARGs_Antibiotics,aes(x=ARGs_Con, y=Antibiotics_Con))+ 
+  geom_point(size=4)+geom_smooth(method=lm)+theme_classic()+
+  ggtitle("ARGs/MGEs abudance and Antibiotics Concentration") +
+  theme(plot.title = element_text(hjust = 0.5),axis.text=element_text(size=16),text = element_text(size = 16))+
+  labs(x="Abundance of ARGs and MGEs", y = "Total Concentration of Antibiotics (ppb)")+annotate(x=-11, y=57, label=paste("R = ", 0.25,"p=",0.6),geom="text", size=6)
+
+```
+
+#Figure S2
+#Principle Coordinates Analysis
+```{r}
+#Data input
+ARG_RA_PCoA <- relativeabundance_downstream
+row.names(ARG_RA_PCoA) <- Output_table_FinalAssay_Gene$Newname
+ARG_RA_PCoA <- ARG_RA_PCoA[-1,-1] %>% 
+  t()
+ARG_RA_PCoA[is.na(ARG_RA_PCoA)] <- 0
+
+PCoA_Env<- read_excel("EI_R_input_sheet.xlsx",sheet = "Env")
+#Distance between samples, bray curties distance
+Let.dist<-vegdist(ARG_RA_PCoA, method="bray")
+ 
+#Whether or not it will return negative eigen values. Faluse, yes. 
+is.euclid(Let.dist)
+PCoA_Figure<-cmdscale(Let.dist, k=nrow(ARG_RA_PCoA)-1,eig=TRUE, add=TRUE)
+ordiplot(PCoA_Figure)
+#Distance X-xis and position Y-xis
+ord.sc<-scores(PCoA_Figure,display="sites", choices=c(1,2))
+PCoA_Beautiful<-cbind(ord.sc, PCoA_Env)
+PCoA_ARG <- ggplot(data=PCoA_Beautiful,aes(x=Dim1,y=Dim2,color=Treatment,shape=Compartment)) +theme_bw()+geom_point(size=8)+
+  labs(x="PCoA Dimension 1", y="PCoA Dimension 2")+
+  ggtitle("ARGs Principle Coordinates Analysis")+
+  theme(axis.text=element_text(size=18),
+        axis.title=element_text(size=18),plot.title = element_text(size=25, hjust=0.5),text = element_text(size = 18)) +
+scale_color_aaas()+geom_text(aes(label=row.names(ord.sc)),hjust=0.5, vjust=1.8,cex=6)
+PCoA_ARG
+```
+
+
+~~~~~Microbial Community~~~~~~~~~
+
+#Data preprocessing, get the input phyloseq file ready
+```{r}
+OTUtableraw <- read_excel("EI_R_input_sheet.xlsx", sheet = "OTU2019RUN")
+
+OTUtable <- OTUtableraw
+OTUtable[OTUtable == 0]<-NA
+OTUControls <- OTUtable %>% 
+  dplyr::select(SBSC,SMSC,STSC,ROC,SOC,SSC)
+denovoID <- OTUtableraw[,c(1,29)]
+
+Average_OTU <- OTUtable[,-1] %>% dplyr::select(-SBSC,-SMSC,-STSC,-ROC,-SOC,-SSC,-taxonomy)
+num_col4 <- ncol(Average_OTU)
+num_row4 <- nrow(Average_OTU)
+#If 2 in 3 triplicate are NA, all of them is NA
+for (i in 1:num_row4){
+  for (j in 1:(num_col4/3)){
+    Process_vector2<-Average_OTU[i, c(j*3-2,j*3-1,j*3)]
+    if (sum(is.na.data.frame(Process_vector2)) ==2){
+      Average_OTU[i, c(j*3-2,j*3-1,j*3)] <- NA
+    }    
+  }
+}
+
+OTUtablenew <- cbind(denovoID,Average_OTU,OTUControls)
+OTUtablenew <- OTUtablenew[
+  rowSums(is.na.data.frame(OTUtablenew)) < 27, 
+  ]
+###Average and standard deviation
+OTUControlTaxonomy <- OTUtablenew[,c(1,2,24:29)]
+Average_OTU2 <- OTUtablenew[,-1] %>% dplyr::select(-SBSC,-SMSC,-STSC,-ROC,-SOC,-SSC,-taxonomy)
+num_row5 <- nrow(Average_OTU2)
+num_col5 <- ncol(Average_OTU2) 
+Average_OTU_sample<-data.frame(matrix(NA,nrow=1998,ncol=7))
+std_OTU_sample<-data.frame(matrix(NA,nrow=1998,ncol=7))
+
+for (i in 1:num_row5){
+  for (j in 1:((num_col5)/3)){
+    Process_vector3<-as.numeric(unlist(Average_OTU2[i, c(j*3-2,j*3-1,j*3)]))
+    
+    if (sum(is.na.data.frame(Process_vector3)) ==3){
+      Average_OTU_sample[i,j] = NA
+      std_OTU_sample[i,j] = NA      
+    }
+    else{
+      average3 <- mean(na.omit(Process_vector3))
+      std_val3 <- sd(na.omit(Process_vector3))
+      Average_OTU_sample[i,j] = average3
+      std_OTU_sample[i,j] = std_val3      
+    }
+  }
+}
+
+columnnamesphar <- c("SBS","SMS","STS","RO","RS","SO","SS")
+colnames(Average_OTU_sample) <- columnnamesphar
+
+OTUtablefinal <- cbind(OTUControlTaxonomy,Average_OTU_sample)
+#denovoID2 <- OTUtablefinal %>% select('#OTU ID')
+OTU <- OTUtablefinal[c('#OTU ID','SBSC','SBS','SMSC','SMS','STSC','STS','ROC','RO','RS','SOC','SO','SSC','SS')]
+row.names(OTU) <- OTU$`#OTU ID` 
+OTU <- OTU[,-1]
+OTU[is.na(OTU)] <- 0
+OTU <- OTU %>% as.matrix()
+Taxonomy <- OTUtablefinal %>% 
+  dplyr::select(taxonomy,'#OTU ID')
+Taxonomy <- Taxonomy %>% 
+  separate(taxonomy,into=c("Domain","Phylum","Class","Order","Family","Genus","Species"),sep=";")
+row.names(Taxonomy) <- Taxonomy$`#OTU ID`
+Taxonomy <- Taxonomy[,-8]
+TAX <- Taxonomy %>% as.data.frame() %>% 
+  mutate(Domain=gsub("k__","",Domain)) %>% 
+  mutate(Phylum=gsub("p__","",Phylum)) %>% 
+  mutate(Class=gsub("c__","",Class)) %>% 
+  mutate(Order=gsub("o__","",Order)) %>% 
+  mutate(Family=gsub("f__","",Family)) %>% 
+  mutate(Genus=gsub("g__","",Genus)) %>% 
+  mutate(Species=gsub("s__","",Species)) %>% 
+  as.matrix()
+
+TAX[is.na(TAX)] <- NA
+TAX <- apply(TAX, 2, function(x) gsub("^$|^ $", NA, x))
+#TAX[is.na(TAX)] <- " Unassigned"
+
+map <- read_excel("EI_R_input_sheet.xlsx", sheet = "Env")
+rownames(map) <- map$SampleID
+OTU=otu_table(OTU,taxa_are_rows = TRUE)
+rownames(TAX) <- row.names(OTU)
+TAX=tax_table(TAX)
+MAP <- sample_data(map)
+physeq = phyloseq(OTU, TAX, MAP)
+
+Tree=rtree(ntaxa(physeq),rooted=TRUE,tip.label = taxa_names(physeq))
+
+physeq = phyloseq(OTU, TAX, MAP,Tree)
+```
+
+#Figure3A: Stacked Barplot with top 10 Phylum
+```{r}
+library(scales)
+phylum.sum = tapply(taxa_sums(physeq), tax_table(physeq)[, "Phylum"], sum, na.rm=TRUE)
+top10phyla = names(sort(phylum.sum, TRUE))[1:10]
+physeqphylum10 = prune_taxa((tax_table(physeq)[, "Phylum"] %in% top10phyla), physeq)
+
+
+phyloGlom = tax_glom(physeqphylum10, "Phylum")
+glomTax = tax_table(phyloGlom)[,"Phylum"]
+glomOTU = otu_table(phyloGlom)
+glomTable = merge(glomOTU,glomTax,by=0,all=TRUE) 
+rownames(glomTable) = glomTable[,"Phylum"]
+glomTable$Row.names = NULL
+glomTable$Phylum = NULL
+
+glomTable2 = glomTable / rep(colSums(glomTable), each = nrow(glomTable))
+glomTable3 <- glomTable2 %>% t()
+
+Com <- map$Compartment
+#rownames(Com) <- "Compartment"
+Sample <- rownames(glomTable3)
+glomTable3 <- cbind(Com,Sample,glomTable3) %>% as.data.frame()
+
+#View(glomTable3)
+MicrobialCommunity2 <-glomTable3  %>% 
+  gather(3:12,key="Bacteria_Phylum",value ="Percentage")
+
+MicrobialCommunity2$Percentage <- as.numeric(as.character(MicrobialCommunity2$Percentage))
+MicrobialCommunity2$Com <- factor(x = MicrobialCommunity2$Com,levels = c("Bottom Soil","Middle Soil","Top Soil","Root","Shoot"))
+MicrobialCommunity2$Sample <- factor(x = MicrobialCommunity2$Sample,levels = c("SBSC","SBS",
+                                                                  "SMSC","SMS","STSC","STS","ROC","RO","RS","SOC","SO","SSC","SS"))
+Structurefigure2<- ggplot()+ theme_bw()+
+  geom_bar(aes(x=Sample, y= Percentage*100, fill=Bacteria_Phylum), data = MicrobialCommunity2,stat="identity") +
+  labs(x="Sample Name", y="Percentage (%)") +
+  scale_y_continuous(labels = dollar_format(suffix = "", prefix = "")) +
+  ggtitle("Microbial Community Structure(Phylum)") +
+  theme(legend.position="top",axis.text=element_text(size=16),
+        axis.title=element_text(size=16),plot.title = element_text(size=22, hjust=0.5),text = element_text(size = 16),
+        axis.text.x = element_text(angle = 90))+
+  facet_wrap(~Com,1,scales = "free_x")+scale_fill_d3()
+Structurefigure2
+```
+
+#Figure 4: stacked barplot with top 10 Family
+```{r}
+family.sum = tapply(taxa_sums(physeq), tax_table(physeq)[, "Family"], sum, na.rm=TRUE)
+
+top10family = names(sort(family.sum, TRUE))[1:10]
+physeqfamily10 = prune_taxa((tax_table(physeq)[, "Family"] %in% top10family), physeq)
+
+phyloGlom = tax_glom(physeqfamily10, "Family")
+glomTax = tax_table(phyloGlom)[,"Family"]
+glomOTU = otu_table(phyloGlom)
+glomTable = merge(glomOTU,glomTax,by=0,all=TRUE) 
+rownames(glomTable) = glomTable[,"Family"]
+glomTable$Row.names = NULL
+glomTable$Family = NULL
+
+glomTable2 = glomTable / rep(colSums(glomTable), each = nrow(glomTable))
+glomTable3 <- glomTable2 %>% t()
+
+Com <- map$Compartment
+#rownames(Com) <- "Compartment"
+Sample <- rownames(glomTable3)
+glomTable3 <- cbind(Com,Sample,glomTable3) %>% as.data.frame()
+View(glomTable3)
+
+MicrobialCommunity <-glomTable3  %>% 
+  gather(3:12,key="Bacteria_Family",value ="Percentage(%)")
+
+MicrobialCommunity$Percentage <- as.numeric(as.character(MicrobialCommunity$Percentage))
+MicrobialCommunity$Com <- factor(x = MicrobialCommunity$Com,levels = c("Bottom Soil","Middle Soil","Top Soil","Root","Shoot"))
+MicrobialCommunity$Sample <- factor(x = MicrobialCommunity$Sample,levels = c("SBSC","SBS",
+                                                                      "SMSC","SMS","STSC","STS","ROC","RO","RS","SOC","SO","SSC","SS"))
+Structurefigure<- ggplot()+ theme_bw()+
+  geom_bar(aes(x=Sample, y= Percentage*100, fill=Bacteria_Family), data = MicrobialCommunity,stat="identity") +
+  labs(x="Sample Name", y="Percentage(%)") +
+  scale_y_continuous(labels = dollar_format(suffix = "", prefix = "")) +
+  ggtitle("Microbial Community Structure(Family)") +
+  theme(legend.position="top",axis.text=element_text(size=16),
+        axis.title=element_text(size=16),plot.title = element_text(size=22, hjust=0.5),text = element_text(size = 16),
+        axis.text.x = element_text(angle = 90))+
+  facet_wrap(~Com,1,scales = "free_x")+scale_fill_d3()
+Structurefigure
+```
+
+#Top20 family to get Pseudomonas
+```{r}
+family.sum = tapply(taxa_sums(physeq), tax_table(physeq)[, "Family"], sum, na.rm=TRUE)
+
+top10family = names(sort(family.sum, TRUE))[1:20]
+physeqfamily10 = prune_taxa((tax_table(physeq)[, "Family"] %in% top10family), physeq)
+
+phyloGlom = tax_glom(physeqfamily10, "Family")
+glomTax = tax_table(phyloGlom)[,"Family"]
+glomOTU = otu_table(phyloGlom)
+glomTable = merge(glomOTU,glomTax,by=0,all=TRUE) 
+rownames(glomTable) = glomTable[,"Family"]
+glomTable$Row.names = NULL
+glomTable$Family = NULL
+
+glomTable2 = glomTable / rep(colSums(glomTable), each = nrow(glomTable))
+glomTable3 <- glomTable2 %>% t()
+
+Com <- map$Compartment
+#rownames(Com) <- "Compartment"
+Sample <- rownames(glomTable3)
+glomTable3 <- cbind(Com,Sample,glomTable3) %>% as.data.frame()
+
+glomTable4 <- glomTable3[,-c(1:2)] %>% t()
+
+#View(glomTable4)
+#write.csv(glomTable4, file="fammily20pseudomonas.csv")
+```
+
+#Figure S4, Ordination analysis of all ordination methods
+```{r}
+#Filter singleton and doubleton
+Lettuce.ordinationfilter = physeq
+wh0 = genefilter_sample(Lettuce.ordinationfilter, filterfun_sample(function(x) x > 2))
+Lettuce.ordinationfilter1 = prune_taxa(wh0, Lettuce.ordinationfilter)
+#Pick up top 5 taxa
+phylum.sum = tapply(taxa_sums(Lettuce.ordinationfilter1), tax_table(Lettuce.ordinationfilter1)[, "Phylum"], sum, na.rm=TRUE)
+top5phyla = names(sort(phylum.sum, TRUE))[1:5]
+physeqphylum5 = prune_taxa((tax_table(Lettuce.ordinationfilter1)[, "Phylum"] %in% top5phyla), Lettuce.ordinationfilter1)
+
+sample_data(physeqphylum5)$Compartment=factor(sample_data(physeqphylum5)$Compartment,
+                                               levels=c("Bottom Soil","Middle Soil","Top Soil","Root","Shoot"))
+#Tried all ordination, DCA gives the best representation.
+dist = "bray"
+ord_meths = c("DCA", "CCA", "RDA", "DPCoA", "NMDS", "MDS", "PCoA")
+plist = llply(as.list(ord_meths), function(i, physeqphylum5, dist){
+  ordi = ordinate(physeqphylum5, method=i, distance=dist)
+  plot_ordination(physeqphylum5, ordi, "SampleID", color="Compartment")
+}, physeqphylum5, dist)
+
+names(plist) <- ord_meths
+
+pdataframe = ldply(plist, function(x){
+  df = x$data[, 1:2]
+  colnames(df) = c("Axis_1", "Axis_2")
+  return(cbind(df, x$data))
+})
+names(pdataframe)[1] = "method"
+
+Ordinationall = ggplot(pdataframe, aes(Axis_1, Axis_2, color=Compartment, shape=Treatment))
+Ordinationall = Ordinationall + geom_point(size=4) + geom_polygon()+ theme_bw()+
+  theme(legend.position="right",axis.text=element_text(size=16),
+    axis.title=element_text(size=16),
+    text = element_text(size = 16))
+Ordinationall = Ordinationall + facet_wrap(~method, scales="free")
+Ordinationall = Ordinationall + scale_fill_brewer(type="qual", palette="Set1")
+Ordinationall = Ordinationall + scale_colour_brewer(type="qual", palette="Set1")
+Ordinationall
+```
+
+#Figure 3B ordination DCA
+```{r}
+#Pickup top10 phyla
+phylum.sum = tapply(taxa_sums(Lettuce.ordinationfilter1), tax_table(Lettuce.ordinationfilter1)[, "Phylum"], sum, na.rm=TRUE)
+top10phyla_ordi = names(sort(phylum.sum, TRUE))[1:10]
+physeqphylum10_ordi = prune_taxa((tax_table(Lettuce.ordinationfilter1)[, "Phylum"] %in% top10phyla_ordi), Lettuce.ordinationfilter1)
+
+sample_data(physeqphylum10_ordi)$Compartment=factor(sample_data(physeqphylum10_ordi)$Compartment,levels=c("Bottom Soil","Middle Soil","Top Soil","Root","Shoot"))
+
+Lettuce.ord <- ordinate(physeqphylum10_ordi,"PCoA","bray")
+CommunityDCA10=plot_ordination(physeqphylum10_ordi,Lettuce.ord,type = "split",color = "Phylum",shape = "Compartment",label="SampleID",title="split")
+
+CommunityDCA10 <- CommunityDCA10+facet_wrap(~Phylum,4)+geom_point(size=6, alpha=1)+
+ ggtitle("Microbial Community Ordination (PCoA)")+ theme_bw()+
+  theme(legend.position="right",axis.text=element_text(size=16),
+    axis.title=element_text(size=16),plot.title = element_text(size=22, hjust=0.5),
+    text = element_text(size = 16),axis.text.x = element_text(angle = 90))
+CommunityDCA10
+```
+
+#Figure 4: Alpha Diversity
+```{r}
+theme_set(theme_bw())
+pal = "Set1"
+scale_colour_discrete <-  function(palname=pal, ...){
+  scale_colour_brewer(palette=palname, ...)
+}
+scale_fill_discrete <-  function(palname=pal, ...){
+  scale_fill_brewer(palette=palname, ...)
+}
+
+physeq
+#Filter OTU not present in any of the samples, infact, it's already filtered in the original physeq 
+physeq_alpha <- prune_taxa(taxa_sums(physeq) > 0, physeq)
+
+otu_table(physeq_alpha) <- otu_table(round(as((otu_table(physeq_alpha)),"matrix")), taxa_are_rows(physeq_alpha))
+
+sample_data(physeq_alpha)$Compartment=factor(sample_data(physeq_alpha)$Compartment,
+                      levels=c("Bottom Soil","Middle Soil","Top Soil","Root","Shoot"))
+
+
+plot_alpha <- plot_richness(physeq_alpha, x="Treatment",color="Compartment", measures="Chao1")
+plot_alpha + geom_point(size=5, alpha=0.7)+ theme(legend.position="right",axis.text=element_text(size=16), axis.title=element_text(size=16),plot.title = element_text(size=24, hjust=0.5),
+                text = element_text(size = 16),axis.text.x = element_text(angle = 0))
+
+```
+
+```{r}
+
+OTUtablefinal <- cbind(OTUControlTaxonomy,Average_OTU_sample)
+#denovoID2 <- OTUtablefinal %>% select('#OTU ID')
+OTU1 <- OTUtablefinal[c('#OTU ID','SOC','SO','SSC','SS')]
+row.names(OTU1) <- OTU1$`#OTU ID` 
+OTU1 <- OTU1[,-1]
+OTU1[is.na(OTU1)] <- 0
+OTU1 <- OTU1 %>% as.matrix()
+Taxonomy <- OTUtablefinal %>% 
+  dplyr::select(taxonomy,'#OTU ID')
+Taxonomy <- Taxonomy %>% 
+  separate(taxonomy,into=c("Domain","Phylum","Class","Order","Family","Genus","Species"),sep=";")
+row.names(Taxonomy) <- Taxonomy$`#OTU ID`
+Taxonomy <- Taxonomy[,-8]
+TAX <- Taxonomy %>% as.data.frame() %>% 
+  mutate(Domain=gsub("k__","",Domain)) %>% 
+  mutate(Phylum=gsub("p__","",Phylum)) %>% 
+  mutate(Class=gsub("c__","",Class)) %>% 
+  mutate(Order=gsub("o__","",Order)) %>% 
+  mutate(Family=gsub("f__","",Family)) %>% 
+  mutate(Genus=gsub("g__","",Genus)) %>% 
+  mutate(Species=gsub("s__","",Species)) %>% 
+  as.matrix()
+
+TAX[is.na(TAX)] <- NA
+TAX <- apply(TAX, 2, function(x) gsub("^$|^ $", NA, x))
+#TAX[is.na(TAX)] <- " Unassigned"
+
+map <- read_excel("EI_R_input_sheet.xlsx", sheet = "Env")
+rownames(map) <- map$SampleID
+OTU1=otu_table(OTU1,taxa_are_rows = TRUE)
+rownames(TAX) <- row.names(OTU1)
+TAX=tax_table(TAX)
+MAP <- sample_data(map)
+physeq = phyloseq(OTU1, TAX, MAP)
+
+Tree=rtree(ntaxa(physeq),rooted=TRUE,tip.label = taxa_names(physeq))
+
+physeq1 = phyloseq(OTU1, TAX, MAP,Tree)
+
+physeq_alpha1 <- prune_taxa(taxa_sums(physeq1) > 0, physeq1)
+
+otu_table(physeq_alpha1) <- otu_table(round(as((otu_table(physeq_alpha1)),"matrix")), taxa_are_rows(physeq_alpha1))
+
+#sample_data(physeq_alpha)$Compartment=factor(sample_data(physeq_alpha)$Compartment,
+                      #levels=c("Bottom Soil","Middle Soil","Top Soil","Root","Shoot"))
+
+
+
+
+#sample_data(physeq_alpha1)$Compartment=factor(sample_data(physeq_alpha)$Compartment,
+                      #levels=c("Shoot"))
+
+
+plot_alpha1 <- plot_richness(physeq_alpha1, x="Irrigation",color="SampleID", measures="Chao1")
+plot_alpha1 + geom_point(size=5, alpha=0.7)+ theme(legend.position="right",axis.text=element_text(size=16), axis.title=element_text(size=16),plot.title = element_text(size=24, hjust=0.5),
+                text = element_text(size = 16),axis.text.x = element_text(angle = 0))
+```
+
+#Correlation Screening
+
+#Non-control screening with antibiotics,
+#Major dataframecorrelationscreening_antibiotics
+```{r}
+#Here start correlation screening
+Corhacking <- relativeabundance_downstream
+row.names(Corhacking) <- Output_table_FinalAssay_Gene$Newname
+
+#Select non-Control ARGs
+Corhacking <- Corhacking[-1,-c(1,2,4,6,8,11,13)] 
+
+#Filter and select Genes appear >=4 in our 7 Phar.samples
+Corhacking <- Corhacking[
+  rowSums(is.na.data.frame(Corhacking)) < 4, 
+  ] %>% 
+  t() %>% 
+  log2()
+
+#Dataframe for correlation screening ARGs & Antibiotics
+Correlation_ARGsRA_Antibiotics_Genes <- cbind(Pharmaceuticalconcentration,Corhacking,SeperateAntibioticsCon) 
+
+#Microbial Community Family VS Antibiotics
+cormicrobial <- glomTable3 %>% dplyr::select(-Com,-Sample)
+
+indx <- sapply(cormicrobial, is.factor)
+cormicrobial[indx] <- lapply(cormicrobial[indx], function(x) as.numeric(as.character(x)))
+
+cormicrobial <- cormicrobial[-c(1,3,5,7,10,12),]
+Correlation_ARGsRA_Antibiotics_Genes
+
+# Matrix for non-control screening (with antibiotics)
+######The screening frame for correlation1
+correlationscreening_antibiotics <- cbind(Correlation_ARGsRA_Antibiotics_Genes,cormicrobial)
+
+#http://www.sthda.com/english/wiki/correlation-matrix-a-quick-start-guide-to-analyze-format-and-visualize-a-correlation-matrix-using-r-software
+flattenCorrMatrix <- function(cormat, pmat) {
+  ut <- upper.tri(cormat)
+  data.frame(
+    row = rownames(cormat)[row(cormat)[ut]],
+    column = rownames(cormat)[col(cormat)[ut]],
+    cor  =(cormat)[ut],
+    p = pmat[ut]
+  )
+}
+outputcorhackARG_Antibiotics<-rcorr(as.matrix(correlationscreening_antibiotics), type="spearman")
+#outputcorhackARG_Antibiotics
+#write.csv(outputcorhackARG_Antibiotics,"outputcorhackARG_Antibiotics.csv")
+#Get the correlation screening table
+OutputtableARG_Antibiotics_p_r<-flattenCorrMatrix(outputcorhackARG_Antibiotics$r,outputcorhackARG_Antibiotics$P)
+outputcorhackARG_Antibiotics <- outputcorhackARG_Antibiotics %>% as.matrix()
+
+#Get the strong coorelation and significant output table
+Outputtable_significant<-OutputtableARG_Antibiotics_p_r %>% 
+  dplyr::rename(pvalue="p", coefficientvalue="cor")
+
+CORRELATION<-
+  filter(Outputtable_significant, coefficientvalue < -0.6 | coefficientvalue> 0.6)
+
+CORRELATION1 <- filter(CORRELATION,pvalue<0.05)
+
+View(CORRELATION1)
+write.table(CORRELATION1, "CORRELATION1", sep="\t")
+```
+
+#Correlation screening ARGs and bacteria (all sample)
+#Major dataframe CorrelationscreeningARGBac
+```{r}
+cormicrobial2 <- glomTable3 %>% dplyr::select(-Com,-Sample)
+indx <- sapply(cormicrobial2, is.factor)
+cormicrobial2[indx] <- lapply(cormicrobial2[indx], function(x) as.numeric(as.character(x)))
+
+Corhacking2 <- relativeabundance_downstream
+row.names(Corhacking2) <- Output_table_FinalAssay_Gene$Newname
+Corhacking2 <- Corhacking2[-1,-1] 
+
+Corhacking2 <- Corhacking2[
+  rowSums(is.na.data.frame(Corhacking2)) < 7, 
+  ] %>% 
+  t() %>% 
+  log2()
+
+#####The screening frame for correlation2
+CorrelationscreeningARGBacscreeningframe <- cbind(ARGscon,cormicrobial2,Corhacking2)
+CorrelationscreeningARGBac<-rcorr(as.matrix(CorrelationscreeningARGBacscreeningframe),type="spearman")
+
+#Get the correlation screening table
+OutputtableARG_Antibiotics_p_r2<-flattenCorrMatrix(CorrelationscreeningARGBac$r,CorrelationscreeningARGBac$P)
+
+#Get the strong coorelation and significant output table
+Outputtable_significant2<-OutputtableARG_Antibiotics_p_r2 %>% 
+  as.tibble() %>% 
+  dplyr::rename(pvalue="p", coefficientvalue="cor")
+
+CORRELATION2<-
+  filter(Outputtable_significant2, coefficientvalue < -0.6 | coefficientvalue> 0.6)
+
+CORRELATION2 <- filter(CORRELATION2,pvalue<0.05)
+
+View(CORRELATION2)
+write.table(CORRELATION2, "CORRELATION2", sep="\t")
+
+#Find Node, the ARGs, bacteria, and antibiotics
+FINDNODE <- rbind(CORRELATION1, CORRELATION2) %>% as.data.frame() %>% dplyr::rename(variable1 = "row") %>% dplyr::rename (variable2 ="column")
+
+a <- unique(FINDNODE$variable1) %>% as.matrix()
+b <- unique(FINDNODE$variable2) %>% as.matrix()
+c <- c(a,b)
+Uniquenode <- unique(c)
+write.csv(Uniquenode, file="FINDNODES.csv") 
+#Output the nodes,delete nodes Oxalobacteraceae,blaSFO,merA (from first table)(no correlation)
+
+```
+#Network triangle
+#With antibiotics (7samples) only select 1) ARGs & Antibiotics 2) Bacteria Communities & Antibiotics
+#Without antibiotics (14samples) select 3) ARGs and bacteria
+
+#Cite used R packages
+```{r}
+#Cite Packages
+#Major function borrowed from Janson Gantenberg's Github page (jrgant)
+citeRpacks <- function(pkg_list, filename, RStudio = FALSE) {
+  #ht to https://stackoverflow.com/questions/2470248/write-lines-of-text-to-a-file-in-r for sink()
+  for (i in 1:length(pkg_list)) {
+      sink(file = paste(filename, ".bib", sep = ""), append = T)
+      writeLines(toBibtex(citation(package = pkg_list[i])))
+      sink()
+  }
+
+  if(RStudio) {
+    c <- RStudio.Version()$citation
+    sink(file = paste(filename, ".bib", sep = ""), append = T)
+    writeLines(paste("@Manual{,",
+                     "\n   title = {", c$title, "},",
+                     "\n   author = {{", c$author, "}},",
+                     "\n   organization = {", c$organization, "},",
+                     "\n   address = {", c$address, "},",
+                     "\n   year = {", c$year, "},",
+                     "\n   note = {", RStudio.Version()$version, "}",
+                     "\n   url = {", c$url, "},",
+                     "\n }",
+                     sep = ""))
+    sink()
+  }
+}
+
+my_packs <- c("ggplot2", "tidyr","base","tidyverse","dplyr","pheatmap",
+              "RColorBrewer","circlize","UpSetR","vegan","phyloseq","ape")
+
+citeRpacks(my_packs, "mybibfile", RStudio = TRUE)
+```
